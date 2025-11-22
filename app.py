@@ -1,56 +1,66 @@
 import os
+from flask import Flask, jsonify, request
 import requests
 import traceback
-from flask import Flask, jsonify
+import json
 
 app = Flask(__name__)
 
 # =======================================================
 # ⬇️ PASTE YOUR TOKEN HERE ⬇️
 # =======================================================
-HARDCODED_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c"
+HARDCODED_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c" 
 # =======================================================
 
-# List of domains to try (Priority Order)
-# Note: stake.us uses a different account system, but we include it as requested.
+# List of domains to try in order
 STAKE_DOMAINS = [
-    "stake.com",      # Main Global
-    "stake.ac",       # Common Mirror
-    "stake.games",    # Mirror
-    "stake.bet",      # Mirror
-    "staketr.com",    # Turkey Mirror
-    "stake.us",       # US Only (Likely 401 Unauthorized with a .com token)
-    "stake.jp"        # Japan Mirror
+    "stake.com",
+    "stake.ac",   # Common mirror
+    "stake.bet",  # Common mirror
+    "stake.games",
+    "stake.us"    # Note: Stake.us requires US IP, others block US IP
 ]
 
-def analyze_403_reason(response_text, headers):
+def get_browser_headers(token, domain):
     """
-    Helper to guess why the request was blocked.
+    Generates the headers you see in your browser (Network Tab).
+    These are the Client Hints (sec-ch-ua) you asked about.
     """
-    text = response_text.lower()
-    
-    if "cloudflare" in text:
-        return "Blocked by Cloudflare WAF (Bot Detection)"
-    if "location" in text or "country" in text or "region" in text:
-        return "Geo-Blocked (Region not allowed)"
-    if "vpn" in text or "proxy" in text:
-        return "Blocked due to Datacenter/VPN IP"
-    if "just a moment" in text:
-        return "Cloudflare JavaScript Challenge (JS Challenge)"
-    
-    # Check headers for Cloudflare specific rays
-    if 'cf-ray' in headers:
-        return f"Cloudflare Ray ID: {headers['cf-ray']} (General Block)"
-        
-    return "Unknown 403 Forbidden Reason"
+    return {
+        'authority': domain,
+        'accept': 'application/graphql+json, application/json',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json',
+        'origin': f'https://{domain}',
+        'referer': f'https://{domain}/casino/games/crash',
+        # THIS IS THE SEC-CH-UA (Spoofing Chrome 124 on Windows)
+        'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'x-access-token': token,
+        'x-language': 'en'
+    }
 
-@app.route('/', methods=['GET', 'POST'])
-def fetch_any_stake_mirror():
-    
-    debug_report = {} # To store why each domain failed
-    success_data = None
-    working_domain = None
+@app.route('/debug', methods=['GET'])
+def show_request_details():
+    """
+    Shows exactly what headers this server is sending to Stake.
+    """
+    headers = get_browser_headers("HIDDEN_TOKEN", "stake.com")
+    return jsonify({
+        "info": "This is what we are sending to Stake:",
+        "simulated_ip": "We cannot change the IP via code. It will be the Render Server IP.",
+        "headers_being_sent": headers
+    })
 
+@app.route('/', methods=['GET'])
+def fetch_data():
+    logs = [] # To store what happened on every domain attempt
+    
     query = """
     query CrashGameListHistory($limit: Int, $offset: Int) {
         crashGameList(limit: $limit, offset: $offset) {
@@ -58,7 +68,6 @@ def fetch_any_stake_mirror():
         }
     }
     """
-    
     payload = {
         'query': query,
         'operationName': 'CrashGameListHistory',
@@ -67,73 +76,47 @@ def fetch_any_stake_mirror():
 
     # --- LOOP THROUGH DOMAINS ---
     for domain in STAKE_DOMAINS:
+        url = f"https://{domain}/_api/graphql"
+        headers = get_browser_headers(HARDCODED_TOKEN, domain)
+        
         try:
-            url = f"https://{domain}/_api/graphql"
-            
-            # Dynamic Headers per Domain
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/graphql+json, application/json',
-                'x-access-token': HARDCODED_TOKEN,
-                'x-language': 'en',
-                'Origin': f'https://{domain}',
-                'Referer': f'https://{domain}/casino/games/crash',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-            }
-
-            # Send Request (Short timeout to fail fast)
+            # We use a session to mimic a browser connection state
             with requests.Session() as s:
-                response = s.post(url, headers=headers, json=payload, timeout=5)
-
-            # 1. SUCCESS CASE
+                response = s.post(url, headers=headers, json=payload, timeout=8)
+            
+            # If successful (200 OK)
             if response.status_code == 200:
                 data = response.json()
-                # Validate structure
                 if 'data' in data and 'crashGameList' in data['data']:
-                    crash_list = data['data']['crashGameList']
-                    crashpoints = [item.get('crashpoint') for item in crash_list if item.get('crashpoint')]
+                    games = data['data']['crashGameList']
+                    points = [g.get('crashpoint') for g in games]
                     
-                    success_data = crashpoints
-                    working_domain = domain
-                    break # Stop looping, we found a working one!
+                    return jsonify({
+                        "success": True,
+                        "working_domain": domain,
+                        "crashpoints": points,
+                        "attempt_logs": logs
+                    })
                 else:
-                    debug_report[domain] = f"Status 200, but invalid JSON: {str(data)[:100]}"
-
-            # 2. 403 FORBIDDEN CASE (Analyze why)
-            elif response.status_code == 403:
-                reason = analyze_403_reason(response.text, response.headers)
-                debug_report[domain] = f"403 Forbidden - {reason}"
-
-            # 3. 401 UNAUTHORIZED (Token invalid for this specific domain)
-            elif response.status_code == 401:
-                debug_report[domain] = "401 Unauthorized (Token invalid for this specific domain/region)"
+                    logs.append(f"{domain}: 200 OK but invalid JSON structure.")
             
-            # 4. OTHER ERRORS
+            # If 403 Forbidden
+            elif response.status_code == 403:
+                logs.append(f"{domain}: 403 Forbidden (Cloudflare blocked IP/Headers).")
+            
             else:
-                debug_report[domain] = f"Status {response.status_code}"
+                logs.append(f"{domain}: Status {response.status_code} - {response.text[:50]}")
 
-        except requests.exceptions.ConnectionError:
-            debug_report[domain] = "Connection Failed (DNS or Host Unreachable)"
         except Exception as e:
-            debug_report[domain] = f"Script Error: {str(e)}"
+            logs.append(f"{domain}: Error - {str(e)}")
 
-    # --- FINAL RESPONSE ---
-    
-    if success_data:
-        # If we found a working domain, return the data
-        return jsonify({
-            "success": True,
-            "source": f"Fetched successfully via {working_domain}",
-            "crashpoints": success_data
-        })
-    else:
-        # If ALL failed, return the detailed debug report
-        return jsonify({
-            "success": False,
-            "message": "All Stake mirrors blocked this request.",
-            "debug_report": debug_report,
-            "hosting_advice": "Render/AWS IPs are being detected as 'Datacenter'. Try deploying to a region like Singapore or Frankfurt, or run locally."
-        }), 403
+    # If the loop finishes and nothing worked:
+    return jsonify({
+        "success": False,
+        "error": "All domains failed.",
+        "analysis": "This likely means the Render Server IP is completely blacklisted by Cloudflare, or the TLS fingerprint of Python requests is detected.",
+        "detailed_logs": logs
+    }), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
