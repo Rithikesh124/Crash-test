@@ -1,22 +1,25 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 import requests
 import json
 
 app = Flask(__name__)
 
-# ==========================================
-# ⚠️ PASTE YOUR STAKE ACCESS TOKEN BELOW ⚠️
-# ==========================================
-HARDCODED_ACCESS_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c" 
-# ==========================================
+# ====================================================
+# ⬇️ PASTE YOUR HARDCODED TOKEN HERE ⬇️
+# ====================================================
+HARDCODED_ACCESS_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c"
+# ====================================================
 
-def fetch_stake_crash_history(limit=50):
+@app.route('/', methods=['GET'])
+def get_crash_points():
     """
-    Fetches the crash game history from Stake.com
+    Fetches crash points using the exact headers/query provided.
     """
-    url = 'https://stake.com/_api/graphql'
     
-    # Headers mimicking a real browser to avoid some blocking
+    # 1. URL
+    url = 'https://stake.com/_api/graphql'
+
+    # 2. HEADERS (Exact copy from your JS snippet)
     headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/graphql+json, application/json',
@@ -26,66 +29,67 @@ def fetch_stake_crash_history(limit=50):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
     }
 
-    query = """
-        query CrashGameListHistory($limit: Int, $offset: Int) {
-            crashGameList(limit: $limit, offset: $offset) {
-                crashpoint
-            }
+    # 3. GRAPHQL BODY (Exact copy from your JS snippet)
+    # We replicate the query structure including id, startTime, etc.
+    # to make the request look identical to the one you trust.
+    query_string = """
+    query CrashGameListHistory($limit: Int, $offset: Int) {
+        crashGameList(limit: $limit, offset: $offset) {
+          id
+          startTime
+          crashpoint
+          hash {
+            id
+            hash
+            __typename
+          }
+          __typename
         }
+    }
     """
 
-    body = {
-        'query': query,
+    payload = {
+        'query': query_string,
         'operationName': "CrashGameListHistory",
         'variables': {
-            'limit': limit,
+            'limit': 20, # As requested in your snippet
             'offset': 0
         }
     }
 
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(body), timeout=10)
-        response.raise_for_status()
+        # Perform the POST request
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        
+        # Check if Stake returned a 403/Forbidden or other error
+        if response.status_code != 200:
+            return jsonify({
+                "error": f"Stake returned status code {response.status_code}",
+                "details": response.text
+            }), response.status_code
+
         data = response.json()
 
-        # Check for internal GraphQL errors
+        # Check for GraphQL errors
         if 'errors' in data:
-            return {"error": "Stake GraphQL Error", "details": data['errors']}
+            return jsonify({"error": "GraphQL Error", "details": data['errors']}), 400
 
-        # Extract just the crashpoint numbers
+        # 4. EXTRACT ONLY CRASH POINTS (Logic from your JS: item => item.crashpoint)
         crash_game_list = data.get('data', {}).get('crashGameList', [])
+        
+        if not crash_game_list:
+             return jsonify({"message": "No data returned", "crashpoints": []}), 200
+
         crashpoints = [item['crashpoint'] for item in crash_game_list if 'crashpoint' in item]
-        
-        return {"success": True, "count": len(crashpoints), "crashpoints": crashpoints}
 
-    except requests.exceptions.RequestException as e:
-        return {"error": "Request failed", "details": str(e)}
+        # Return JSON response
+        return jsonify({
+            "success": True,
+            "crashpoints": crashpoints
+        })
+
     except Exception as e:
-        return {"error": "Unknown error", "details": str(e)}
-
-@app.route('/', methods=['GET'])
-def home():
-    """
-    Endpoint to get crash points.
-    Usage: GET /?limit=20 (default is 50)
-    """
-    # Check if token is set
-    if not HARDCODED_ACCESS_TOKEN or "PASTE_YOUR" in HARDCODED_ACCESS_TOKEN:
-        return jsonify({"error": "Configuration Error", "message": "You must put your Access Token inside api/index.py"}), 500
-
-    # Get limit from URL query, e.g., site.com/?limit=10
-    limit_param = request.args.get('limit', default=50, type=int)
-    
-    # Cap the limit to avoid timeouts/bans
-    if limit_param > 100:
-        limit_param = 100
-
-    result = fetch_stake_crash_history(limit=limit_param)
-    
-    if "error" in result:
-        return jsonify(result), 500
-        
-    return jsonify(result), 200
+        return jsonify({"error": "Server Error", "details": str(e)}), 500
 
 # For local testing
 if __name__ == '__main__':
