@@ -1,85 +1,69 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import requests
-import json
+import traceback
 
 app = Flask(__name__)
 
-# =======================================================
-# ⬇️ PASTE THE TOKEN THAT WORKS IN TERMUX HERE ⬇️
-# =======================================================
-HARDCODED_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c" 
-# =======================================================
+# YOUR TOKEN
+HARDCODED_TOKEN = "684655d7eb7fa4b39ef670d442b79e019433b1aec861d0c2336c27f918c062ad99649121eb15d1303491ff0d0d2da67c"
 
-@app.route('/', methods=['GET'])
-def handler():
-    # 1. Exact Headers from your bos.py
-    headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/graphql+json, application/json',
-        'x-access-token': HARDCODED_TOKEN,
-        'x-language': 'en',
-        'Referer': 'https://stake.com/casino/games/crash',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-    }
+@app.route('/test', methods=['GET'])
+def test():
+    return jsonify({"status": "Server is running!", "libs": "Flask/Requests installed correctly"})
 
-    # 2. Exact GraphQL Query from your bos.py
-    query = """
-    query CrashGameListHistory($limit: Int, $offset: Int) {
-        crashGameList(limit: $limit, offset: $offset) {
-            id
-            startTime
-            crashpoint
-            hash {
-                id
-                hash
-                __typename
-            }
-            __typename
-        }
-    }
-    """
-
-    payload = {
-        'query': query,
-        'operationName': 'CrashGameListHistory',
-        'variables': {
-            'limit': 20,
-            'offset': 0
-        }
-    }
-
+@app.route('/', methods=['GET', 'POST'])
+def home():
     try:
-        # 3. Request Logic
-        url = 'https://stake.com/_api/graphql'
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        
-        # Check for non-200 status (like 403 Forbidden)
-        if response.status_code != 200:
-             return jsonify({
-                 "error": f"Stake Request Failed: {response.status_code}", 
-                 "details": response.text
-             }), response.status_code
+        # Headers exactly as requested
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/graphql+json, application/json',
+            'x-access-token': HARDCODED_TOKEN,
+            'x-language': 'en',
+            'Referer': 'https://stake.com/casino/games/crash',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+        }
 
-        data = response.json()
-        
-        # 4. Parsing Logic
-        if 'data' in data and 'crashGameList' in data['data']:
-            crash_game_list = data['data']['crashGameList']
-            crashpoints = [item['crashpoint'] for item in crash_game_list]
-            
-            # Return JSON so your other projects can use it
+        query = """
+        query CrashGameListHistory($limit: Int, $offset: Int) {
+            crashGameList(limit: $limit, offset: $offset) {
+                crashpoint
+            }
+        }
+        """
+
+        payload = {
+            'query': query,
+            'operationName': 'CrashGameListHistory',
+            'variables': {'limit': 20, 'offset': 0}
+        }
+
+        # Send Request
+        response = requests.post('https://stake.com/_api/graphql', headers=headers, json=payload, timeout=9)
+
+        # Handle 403 Forbidden specifically
+        if response.status_code == 403:
             return jsonify({
-                "success": True,
-                "crashpoints": crashpoints
-            })
-        else:
-            return jsonify({"error": "Unexpected Data Structure", "raw": data}), 500
+                "error": "Forbidden",
+                "message": "Stake.com is blocking Vercel's IP address. This code works in Termux because Termux uses your phone's IP.",
+                "solution": "You cannot host this on Vercel. You must host it on a VPS (DigitalOcean/Linode) or keep running it locally."
+            }), 403
 
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": "Request Exception", "details": str(e)}), 500
+        response.raise_for_status()
+        data = response.json()
+
+        # Extract points
+        if 'data' in data and 'crashGameList' in data['data']:
+            games = data['data']['crashGameList']
+            # Safely get crashpoint, default to 0.0 if missing
+            points = [g.get('crashpoint', 0.0) for g in games]
+            return jsonify({"success": True, "crashpoints": points})
+
+        return jsonify({"error": "Unknown Data Format", "data": data}), 500
+
     except Exception as e:
-        return jsonify({"error": "Server Error", "details": str(e)}), 500
+        return jsonify({"error": "Internal Error", "details": str(e), "trace": traceback.format_exc()}), 500
 
-# Local testing
+# Local start
 if __name__ == '__main__':
     app.run(debug=True)
